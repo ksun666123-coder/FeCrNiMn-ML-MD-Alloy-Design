@@ -1,0 +1,165 @@
+# ==========================================================
+# Fe-Cr-Ni-Mn FCC - Elastic constants (C11, C12, C44) -> VRH G
+# Fixes included:
+# 1) Correct stress capture (no ${pxx} illegal substitution)
+# 2) Freeze Cij values immediately after deformation (avoid lazy eval)
+# 3) Correct element order in pair_coeff to match type IDs
+# Output:
+#   RESULT,Fe,Cr,Ni,Mn,C11,C12,C44,G   (GPa)
+# ==========================================================
+
+units           metal
+dimension       3
+boundary        p p p
+atom_style      atomic
+
+# ----------------------------
+# Receive variables (from -var)
+# ----------------------------
+variable        xFe index 0.25
+variable        xCr index 0.25
+variable        xNi index 0.25
+variable        xMn index 0.25
+variable        seed index 12345
+variable        potfile index FeNiCrMn_EAM_Daramola2022.eam.alloy
+
+# Optional: print composition sum check
+variable        sum equal ${xFe}+${xCr}+${xNi}+${xMn}
+print "INFO: xFe=${xFe} xCr=${xCr} xNi=${xNi} xMn=${xMn} sum=${sum}"
+
+# ----------------------------
+# 1) Build FCC box
+# ----------------------------
+lattice         fcc 3.52
+region          box block 0 10 0 10 0 10
+create_box      4 box
+create_atoms    1 box
+
+# types: 1 Fe, 2 Cr, 3 Ni, 4 Mn
+mass            1 55.85
+mass            2 51.99
+mass            3 58.69
+mass            4 54.94
+
+# ----------------------------
+# 2) Random solid solution assignment
+# ----------------------------
+variable        seed1 equal ${seed}
+variable        seed2 equal ${seed}+17
+variable        seed3 equal ${seed}+29
+
+# Put Cr into all atoms
+set             group all type/fraction 2 ${xCr} ${seed1}
+
+# Put Ni among remaining Fe (type 1)
+variable        rem1 equal 1.0-${xCr}
+if "${rem1} <= 0.0" then "print 'ERROR: rem1<=0 (xCr too large)'; quit 1"
+variable        fNi equal ${xNi}/${rem1}
+group           gFe type 1
+set             group gFe type/fraction 3 ${fNi} ${seed2}
+
+# Put Mn among remaining Fe (type 1)
+variable        rem2 equal 1.0-${xCr}-${xNi}
+if "${rem2} <= 0.0" then "print 'ERROR: rem2<=0 (xCr+xNi too large)'; quit 1"
+variable        fMn equal ${xMn}/${rem2}
+group           gFe delete
+group           gFe type 1
+set             group gFe type/fraction 4 ${fMn} ${seed3}
+
+# ----------------------------
+# 3) Potential
+# ----------------------------
+pair_style      eam/alloy
+# IMPORTANT: order must match types: Fe Cr Ni Mn
+pair_coeff      * * ${potfile} Fe Cr Ni Mn
+
+neighbor        2.0 bin
+neigh_modify    delay 5
+
+timestep        0.001
+
+# Helpful thermo for debugging
+thermo          200
+thermo_style    custom step temp pe etotal press pxx pyy pzz pxy pxz pyz
+
+# ----------------------------
+# 4) Anneal + minimize
+# ----------------------------
+velocity        all create 300.0 ${seed} dist gaussian
+change_box      all triclinic
+
+fix             f1 all npt temp 300.0 300.0 0.1 iso 0.0 0.0 1.0
+run             5000
+unfix           f1
+
+fix             f2 all npt temp 300.0 0.1 0.1 iso 0.0 0.0 1.0
+run             2000
+unfix           f2
+
+minimize        1.0e-12 1.0e-12 10000 100000
+
+# Make sure thermo is updated at the minimized state
+run             0
+
+# ----------------------------
+# 5) Freeze reference stresses (CORRECT WAY)
+# ----------------------------
+# pxx/pyy/pxy are thermo keywords, cannot do ${pxx}.
+# We first define equal-variables then freeze as constants via ${...}.
+variable        pxx_ref equal pxx
+variable        pyy_ref equal pyy
+variable        pxy_ref equal pxy
+
+variable        PXX0 equal ${pxx_ref}
+variable        PYY0 equal ${pyy_ref}
+variable        PXY0 equal ${pxy_ref}
+
+# Conversion: pressure in bar; 10000 bar = 1 GPa
+# small strain magnitude
+variable        up equal 1.0e-3
+
+# ----------------------------
+# 6) C11 & C12: apply x strain
+# ----------------------------
+change_box      all x scale 1.001 remap units box
+minimize        1.0e-10 1.0e-10 2000 20000
+run             0
+
+# compute NOW at strained state, then FREEZE
+variable        C11_now equal -(pxx - v_PXX0)/10000.0/v_up
+variable        C12_now equal -(pyy - v_PYY0)/10000.0/v_up
+variable        C11 equal ${C11_now}
+variable        C12 equal ${C12_now}
+
+# revert x strain
+change_box      all x scale 0.999000999 remap units box
+minimize        1.0e-10 1.0e-10 2000 20000
+run             0
+
+# ----------------------------
+# 7) C44: apply xy shear
+# ----------------------------
+change_box      all xy delta 0.001 remap units box
+minimize        1.0e-10 1.0e-10 2000 20000
+run             0
+
+variable        gamma equal 0.001/ly
+variable        C44_now equal -(pxy - v_PXY0)/10000.0/v_gamma
+variable        C44 equal ${C44_now}
+
+# revert shear
+change_box      all xy delta -0.001 remap units box
+minimize        1.0e-10 1.0e-10 2000 20000
+run             0
+
+# ----------------------------
+# 8) VRH shear modulus
+# ----------------------------
+variable        GV equal (v_C11 - v_C12 + 3.0*v_C44)/5.0
+variable        GR equal (5.0*(v_C11 - v_C12)*v_C44)/(4.0*v_C44 + 3.0*(v_C11 - v_C12))
+variable        G_final equal (v_GV + v_GR)/2.0
+
+# ----------------------------
+# 9) Output (single line for parser)
+# ----------------------------
+print "RESULT,${xFe},${xCr},${xNi},${xMn},${C11},${C12},${C44},${G_final}"

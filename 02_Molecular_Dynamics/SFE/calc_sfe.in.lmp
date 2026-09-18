@@ -1,0 +1,109 @@
+# ==========================================================
+# Fe-Cr-Ni-Mn FCC stacking fault energy (SFE) - periodic-cell calculation
+# Method: oriented FCC, slip plane (111), slip direction <112>
+# boundary p p p -> two faults -> divide by nfault=2
+# Output:
+#   RESULT_SFE,Fe,Cr,Ni,Mn,SFE_mJm2,Eperfect,Efault,Area_A2
+# ==========================================================
+
+units           metal
+dimension       3
+boundary        p p p
+atom_style      atomic
+
+# ---- variables passed from command line ----
+variable        xFe index 0.25
+variable        xCr index 0.25
+variable        xNi index 0.25
+variable        xMn index 0.25
+variable        seed index 12345
+variable        potfile index FeNiCrMn_EAM_Daramola2022.eam.alloy
+
+# ---- build parameters ----
+variable        a0   equal 3.52
+variable        nx   equal 12
+variable        ny   equal 12
+variable        nz   equal 24
+
+# p p p -> normally TWO stacking faults in the periodic cell
+variable        nfault equal 2.0
+
+# ---- oriented FCC: x || [11-2] (a <112> direction), y || [-110], z || [111] ----
+lattice         fcc ${a0} orient x 1 1 -2 orient y -1 1 0 orient z 1 1 1
+region          box block 0 ${nx} 0 ${ny} 0 ${nz} units lattice
+create_box      4 box
+create_atoms    1 box
+
+# types: 1 Fe, 2 Cr, 3 Ni, 4 Mn
+mass            1 55.85
+mass            2 51.99
+mass            3 58.69
+mass            4 54.94
+
+# ---- random solid solution assignment ----
+variable        seed1 equal ${seed}
+variable        seed2 equal ${seed}+17
+variable        seed3 equal ${seed}+29
+
+set             group all type/fraction 2 ${xCr} ${seed1}
+
+variable        rem1 equal 1.0-${xCr}
+if "${rem1} <= 0.0" then "print 'ERROR: rem1<=0 (xCr too large)'; quit 1"
+variable        fNi equal ${xNi}/${rem1}
+group           gFe type 1
+set             group gFe type/fraction 3 ${fNi} ${seed2}
+
+variable        rem2 equal 1.0-${xCr}-${xNi}
+if "${rem2} <= 0.0" then "print 'ERROR: rem2<=0 (xCr+xNi too large)'; quit 1"
+variable        fMn equal ${xMn}/${rem2}
+group           gFe delete
+group           gFe type 1
+set             group gFe type/fraction 4 ${fMn} ${seed3}
+
+# ---- potential ----
+pair_style      eam/alloy
+# IMPORTANT: order must match type1..4 = Fe Cr Ni Mn
+pair_coeff      * * ${potfile} Fe Cr Ni Mn
+
+neighbor        2.0 bin
+neigh_modify    delay 5
+
+thermo          200
+thermo_style    custom step pe press pxx pyy pzz
+
+# ---- relax perfect ----
+minimize        1.0e-10 1.0e-10 10000 100000
+run             0
+
+variable        Eperf_tmp equal pe
+variable        Eperf equal ${Eperf_tmp}
+
+variable        Area_tmp equal lx*ly
+variable        Area equal ${Area_tmp}
+
+# ---- define upper half and rigid shift by a/6<112> ----
+# x axis is along <112>, so shift magnitude = |a/6<112>| = a/sqrt(6)
+variable        dx equal v_a0/sqrt(6.0)
+
+variable        zmid_tmp equal 0.5*lz
+variable        zmid equal ${zmid_tmp}
+
+region          upper block INF INF INF INF ${zmid} INF units box
+group           upper region upper
+
+displace_atoms  upper move ${dx} 0.0 0.0 units box
+
+# ---- relax faulted ----
+minimize        1.0e-10 1.0e-10 10000 100000
+run             0
+
+variable        Efault_tmp equal pe
+variable        Efault equal ${Efault_tmp}
+
+# ---- SFE ----
+# 1 eV/Ang^2 = 16021.76634 mJ/m^2
+variable        conv equal 16021.76634
+variable        gamma_eVA2 equal (v_Efault - v_Eperf) / v_Area / v_nfault
+variable        gamma_mJm2 equal v_gamma_eVA2 * v_conv
+
+print "RESULT_SFE,${xFe},${xCr},${xNi},${xMn},${gamma_mJm2},${Eperf},${Efault},${Area}"

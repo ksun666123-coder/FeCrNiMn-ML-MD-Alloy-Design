@@ -1,0 +1,113 @@
+# ============================================================
+# Equiatomic Fe-Cr-Ni-Mn tensile @300K
+# Composition: Fe25 Cr25 Ni25 Mn25
+# Run to 40% strain
+# Dump: xu yu zu for OVITO DXA/PTM
+# ============================================================
+
+units           metal
+dimension       3
+boundary        p p p
+atom_style      atomic
+
+variable        tag string Equiatomic
+
+variable        xFe equal 0.2500
+variable        xCr equal 0.2500
+variable        xNi equal 0.2500
+variable        xMn equal 0.2500
+
+variable        sum equal ${xFe}+${xCr}+${xNi}+${xMn}
+print "INFO: tag=${tag}"
+print "INFO: xFe=${xFe}, xCr=${xCr}, xNi=${xNi}, xMn=${xMn}, sum=${sum}"
+
+variable        a   equal 3.60
+variable        nx  equal 40
+variable        ny  equal 40
+variable        nz  equal 40
+
+lattice         fcc ${a}
+region          box block 0 ${nx} 0 ${ny} 0 ${nz}
+create_box      4 box
+create_atoms    1 box
+
+mass 1 55.845
+mass 2 51.9961
+mass 3 58.6934
+mass 4 54.938
+
+set type 1 type/fraction 2 ${xCr} 1001
+variable        fNi equal ${xNi}/(1.0-${xCr})
+set type 1 type/fraction 3 ${fNi} 1002
+variable        fMn equal ${xMn}/(1.0-${xCr}-${xNi})
+set type 1 type/fraction 4 ${fMn} 1003
+
+variable        potfile string ../potential/FeNiCrMn_EAM_Daramola2022.eam.alloy
+
+pair_style      eam/alloy
+pair_coeff      * * ${potfile} Fe Cr Ni Mn
+
+neighbor        2.0 bin
+neigh_modify    delay 10 check yes
+
+variable        dt equal 0.001
+timestep        ${dt}
+
+thermo          1000
+thermo_style    custom step time temp press pxx pyy pzz lx ly lz pe ke etotal
+
+min_style       cg
+minimize        1e-8 1e-10 1000 10000
+
+variable        use_void equal 0
+if "${use_void} == 1" then "jump SELF make_void"
+jump SELF after_void
+
+label make_void
+variable cx equal 0.5*lx
+variable cy equal 0.5*ly
+variable cz equal 0.5*lz
+region void sphere v_cx v_cy v_cz 15 units box
+delete_atoms region void
+print "INFO: void inserted (r=15 A)"
+jump SELF after_void
+
+label after_void
+
+reset_timestep  0
+velocity        all create 300 12345 mom yes rot no dist gaussian
+
+fix             EQ all npt temp 300 300 0.1 iso 0 0 1.0
+run             50000
+unfix           EQ
+
+run 0
+variable        Lx0 equal lx
+variable        Lx0c equal ${Lx0}
+print           "Frozen Lx0c = ${Lx0c} Angstrom"
+
+variable        erate     equal 1.0e-3
+variable        totstrain equal 0.40
+variable        nsteps    equal ceil(${totstrain}/(${erate}*${dt}))
+print           "INFO: target strain=${totstrain}, dt=${dt} ps, erate=${erate}/ps, nsteps=${nsteps}"
+
+variable        strain equal (lx-v_Lx0c)/v_Lx0c
+variable        stress equal -pxx*1.0e-4
+
+fix             T all npt temp 300 300 0.1 y 0 0 1.0 z 0 0 1.0 couple yz
+fix             D all deform 1 x erate ${erate} units box remap x
+
+fix             SS all print 200 "${strain} ${stress}" file stress_strain_${tag}.dat screen no title "strain stress_GPa"
+
+dump            1 all custom 2000 dump_tensile_${tag}.lammpstrj id type xu yu zu
+dump_modify     1 sort id
+
+thermo_style    custom step time temp lx v_strain v_stress pxx pyy pzz pe ke etotal
+run             ${nsteps}
+
+unfix           SS
+unfix           D
+unfix           T
+
+write_restart   restart_tensile_${tag}
+print           "DONE"

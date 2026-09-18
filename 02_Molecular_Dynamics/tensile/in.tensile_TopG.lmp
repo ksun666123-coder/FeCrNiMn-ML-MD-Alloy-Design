@@ -1,0 +1,121 @@
+# ============================================================
+# Top03 Fe-Cr-Ni-Mn tensile test without void @300 K
+# Composition: Fe=0.35680200, Cr=0.05000000, Ni=0.35851700, Mn=0.23468100
+# Run to 40% strain
+# Output:
+#   stress_strain_Top03_Fe35p68Cr5p00Ni35p85Mn23p47.dat
+#   dump_tensile_Top03_Fe35p68Cr5p00Ni35p85Mn23p47.lammpstrj
+# ============================================================
+
+units           metal
+dimension       3
+boundary        p p p
+atom_style      atomic
+
+variable        tag string Top03_Fe35p68Cr5p00Ni35p85Mn23p47
+
+variable        xFe equal 0.35680200
+variable        xCr equal 0.05000000
+variable        xNi equal 0.35851700
+variable        xMn equal 0.23468100
+variable        seed equal 15336
+variable        potfile string ../potential/FeNiCrMn_EAM_Daramola2022.eam.alloy
+
+variable        sum equal ${xFe}+${xCr}+${xNi}+${xMn}
+print "INFO: tag=${tag}"
+print "INFO: xFe=${xFe}, xCr=${xCr}, xNi=${xNi}, xMn=${xMn}, sum=${sum}, seed=${seed}"
+
+# ---------- build FCC random solid solution ----------
+variable        a   equal 3.60
+variable        nx  equal 40
+variable        ny  equal 40
+variable        nz  equal 40
+
+lattice         fcc ${a}
+region          box block 0 ${nx} 0 ${ny} 0 ${nz}
+create_box      4 box
+create_atoms    1 box
+
+# atom types: 1 Fe, 2 Cr, 3 Ni, 4 Mn
+mass            1 55.845
+mass            2 51.9961
+mass            3 58.6934
+mass            4 54.938
+
+# ---------- random solid solution assignment ----------
+variable        seed1 equal ${seed}
+variable        seed2 equal ${seed}+17
+variable        seed3 equal ${seed}+29
+
+set             group all type/fraction 2 ${xCr} ${seed1}
+
+variable        rem1 equal 1.0-${xCr}
+if "${rem1} <= 0.0" then "print 'ERROR: rem1<=0'; quit 1"
+variable        fNi equal ${xNi}/${rem1}
+group           gFe type 1
+set             group gFe type/fraction 3 ${fNi} ${seed2}
+
+variable        rem2 equal 1.0-${xCr}-${xNi}
+if "${rem2} <= 0.0" then "print 'ERROR: rem2<=0'; quit 1"
+variable        fMn equal ${xMn}/${rem2}
+group           gFe delete
+group           gFe type 1
+set             group gFe type/fraction 4 ${fMn} ${seed3}
+
+# ---------- potential ----------
+pair_style      eam/alloy
+pair_coeff      * * ${potfile} Fe Cr Ni Mn
+
+neighbor        2.0 bin
+neigh_modify    delay 10 check yes
+
+variable        dt equal 0.001
+timestep        ${dt}
+
+thermo          1000
+thermo_style    custom step time temp press pxx pyy pzz lx ly lz pe ke etotal
+
+# ---------- minimization ----------
+min_style       cg
+minimize        1.0e-8 1.0e-10 1000 10000
+
+# ---------- equilibration at 300 K and zero pressure ----------
+reset_timestep  0
+velocity        all create 300 ${seed} mom yes rot no dist gaussian
+
+fix             EQ all npt temp 300 300 0.1 iso 0 0 1.0
+run             50000
+unfix           EQ
+
+# ---------- tensile deformation ----------
+run             0
+variable        Lx0 equal lx
+variable        Lx0c equal ${Lx0}
+print           "INFO: Frozen Lx0c = ${Lx0c} Angstrom"
+
+variable        erate     equal 1.0e-3
+variable        totstrain equal 0.40
+variable        nsteps    equal ceil(${totstrain}/(${erate}*${dt}))
+print           "INFO: target strain=${totstrain}, dt=${dt} ps, erate=${erate}/ps, nsteps=${nsteps}"
+
+variable        strain equal (lx-v_Lx0c)/v_Lx0c
+# pxx unit in metal is bar; 1 bar = 1.0e-4 GPa. Tensile stress uses -pxx.
+variable        stress equal -pxx*1.0e-4
+
+fix             T all npt temp 300 300 0.1 y 0 0 1.0 z 0 0 1.0 couple yz
+fix             D all deform 1 x erate ${erate} units box remap x
+
+fix             SS all print 200 "${strain} ${stress}" file stress_strain_${tag}.dat screen no title "strain stress_GPa"
+
+dump            1 all custom 2000 dump_tensile_${tag}.lammpstrj id type xu yu zu
+dump_modify     1 sort id
+
+thermo_style    custom step time temp lx ly lz v_strain v_stress pxx pyy pzz pe ke etotal
+run             ${nsteps}
+
+unfix           SS
+unfix           D
+unfix           T
+
+write_restart   restart_tensile_${tag}
+print           "DONE: ${tag}"
